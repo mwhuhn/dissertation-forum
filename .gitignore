@@ -1,0 +1,12 @@
+.Rproj
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+/clean_data
+/database
+/papers
+/plots
+/presentation
+/utils

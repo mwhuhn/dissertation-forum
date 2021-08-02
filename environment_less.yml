@@ -1,0 +1,17 @@
+name: forum
+channels:
+  - defaults
+dependencies:
+  - pandas
+  - jupyter
+  - scipy
+  - nltk
+  - matplotlib
+  - statsmodels
+  - beautifulsoup4
+  - requests
+  - swifter
+  - gensim
+  - pyldavis
+  - html5lib
+prefix: /home/mwh/miniconda3/envs/forum

@@ -1,0 +1,29 @@
+SQL summary stats
+
+Counts by year and subforum:
+
+SELECT substr(date_created, 1, 4) AS year, subforum, COUNT(message_id) AS n
+FROM posts
+GROUP BY subforum, year
+ORDER BY subforum, year;
+
+Counts by year and subform minus emptys and spam:
+
+SELECT substr(p.date_created, 1, 4) AS year, p.subforum AS subforum, COUNT(p.message_id) AS n
+FROM text AS t
+JOIN posts AS p
+ON t.message_id = p.message_id
+WHERE t.text_clean<>"" AND t.probable_spam=0
+GROUP BY subforum, year
+ORDER BY subforum, year;
+
+Counts by year and subform only spam:
+
+SELECT substr(p.date_created, 1, 4) AS year, p.subforum AS subforum, COUNT(p.message_id) AS n
+FROM text AS t
+JOIN posts AS p
+ON t.message_id = p.message_id
+WHERE t.probable_spam=1
+GROUP BY subforum, year
+ORDER BY subforum, year;
+
