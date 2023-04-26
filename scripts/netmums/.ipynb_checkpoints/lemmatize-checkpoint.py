@@ -85,6 +85,19 @@ def process_data(forum="all", group="all", id_type="thread_id", per=1, n_chunks=
 	print("saving data")
 	save_data(text, forum, group, id_type, n_chunks)
 
+def process_data_df(df, savename, n_chunks):
+	df = clean_data(df)
+	df.to_csv(str(path_clean_data / "clean_text_{}".format(savename)), index=False)
+	print("saved clean text")
+	print("text to list")
+	df['bigrams'] = text_to_list(df['text_clean'], n_chunks)
+	print("making bigrams")
+	df['bigrams'] = make_bigrams(df['bigrams'], n_chunks)
+	print("grouping by thread_id")
+	text = df[['thread_id','bigrams']].groupby(['thread_id'])['bigrams'].sum().tolist()
+	print("saving data")
+	save_data_df(text, savename, n_chunks)
+
 def save_text_list(forum="all", group="all", force=False):
 	if not Path(path_text_list.format(forum, group)).exists() or force:
 		df = pd.read_csv(path_clean_text.format(forum, group))
@@ -123,9 +136,20 @@ def load_data(forum="all", group="all", per=1):
 	conn.close()
 	return df
 
+
+
 def save_data(text, forum="all", group="all", id_type="thread_id", n_chunks=1):
 	pickle.dump(text, open(path_lemma_pkl.format(forum, group, id_type), 'wb'))
-	dictionary = corpora.Dictionary(text)
+	if n_chunks == 1:
+		dictionary = corpora.Dictionary(text)
+	else:
+		length = len(text)
+		size = length // n_chunks + (length % n_chunks > 0) # round up
+		for i, grp in enumerate(chunk_list(text, size)):
+			if i == 0:
+				dictionary = corpora.Dictionary(grp)
+			else:
+				dictionary.add_documents(grp)
 	dictionary.save(FileIO(path_dictionary_gensim.format(forum, group, id_type), "wb"))
 	if n_chunks > 1:
 		length = len(text)
@@ -136,6 +160,29 @@ def save_data(text, forum="all", group="all", id_type="thread_id", n_chunks=1):
 	else:
 		corpus = [dictionary.doc2bow(t) for t in text]
 	pickle.dump(corpus, open(path_corpus_pkl.format(forum, group, id_type), 'wb'))
+
+def save_data_df(text, savename, n_chunks=1):
+	pickle.dump(text, open(str(path_clean_data / "lemmatized_text_{}.pkl".format(savename)), 'wb'))
+	if n_chunks == 1:
+		dictionary = corpora.Dictionary(text)
+	else:
+		length = len(text)
+		size = length // n_chunks + (length % n_chunks > 0) # round up
+		for i, grp in enumerate(chunk_list(text, size)):
+			if i == 0:
+				dictionary = corpora.Dictionary(grp)
+			else:
+				dictionary.add_documents(grp)
+	dictionary.save(FileIO(str(path_clean_data / "dictionary_{}.gensim".format(savename)), "wb"))
+	if n_chunks > 1:
+		length = len(text)
+		size = length // n_chunks + (length % n_chunks > 0) # round up
+		corpus = []
+		for grp in chunk_list(text, size): # iterable
+			corpus = corpus + [dictionary.doc2bow(g) for g in grp]
+	else:
+		corpus = [dictionary.doc2bow(t) for t in text]
+	pickle.dump(corpus, open(str(path_clean_data / "corpus_{}.pkl".format(savename)), 'wb'))
 
 def chunk_list(l, n):
 	"""Yield successive n-sized chunks from lst."""
@@ -238,6 +285,7 @@ def make_bigrams(text, n_chunks=1):
 		grp = grp.tolist()
 		result = result + [bigram_mod[g] for g in grp]
 	return result
+
 
 def clean_data(df):
 	df = replace_emoji(df)

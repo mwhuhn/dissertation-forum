@@ -17,10 +17,12 @@ path_root <- dirname(dirname(dirname(rstudioapi::getSourceEditorContext()$path))
 path_group <- paste0(path_root, "/clean_data/netmums/group-fe.csv")
 group <- read.csv(path_group, stringsAsFactors=FALSE, fileEncoding="UTF-8")
 
+group <- foreign::read.dta("~/Documents/dissertation/forum/clean_data/netmums/daily_propensity_scores.dta")
+write.csv(group, "~/Documents/dissertation/forum/clean_data/netmums/daily_propensity_scores.csv", row.names = FALSE)
 
-fe <- plm(mean_com_sen ~ 1,
+fe <- plm(pos ~ time_since_first_period*sn_user,
           data=group,
-          index=c("user_url", "ymd"),
+          index=c("user_url", "time_since_first_period"),
           model="within",
           effect="twoways")
 summary(fe)

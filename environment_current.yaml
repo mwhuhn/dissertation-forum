@@ -1,0 +1,29 @@
+name: forum
+channels:
+  - defaults
+dependencies:
+  - pandas
+  - jupyter
+  - scipy
+  - nltk
+  - matplotlib
+  - statsmodels
+  - beautifulsoup4
+  - requests
+  - swifter
+  - gensim
+  - pyldavis
+  - html5lib
+  - tqdm
+  - spacy
+  - regex
+  - scikit-learn
+  - seaborn
+  - pandas-datareader
+  - wordcloud
+  - networkx
+  - jupyterlab
+  - linearmodels
+  - numpy
+  - feather-format
+prefix: /home/mwh/miniconda3/envs/forum

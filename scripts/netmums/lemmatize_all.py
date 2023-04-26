@@ -8,7 +8,6 @@ from nltk.corpus import wordnet as wn
 from nltk.corpus import stopwords
 from nltk.tokenize import RegexpTokenizer
 from nltk import FreqDist
-
 # gensim
 from gensim import corpora, models
 # data
@@ -26,6 +25,12 @@ import sqlite3
 from scraping import create_connection
 # saving
 import pickle
+# timing
+import time
+# dask
+import dask.dataframe as dd
+from dask.multiprocessing import get
+
 
 ## File Locations
 
@@ -59,130 +64,83 @@ emoticon_lookaround = r'(?:(^)|(\s)|(?<=:\-\))|(?<=:\))|(?<=:\-\])|(?<=:\]:\-3)|
 
 ## Functions
 
-def save_clean_text(df, forum="all", group="all", id_type="thread_id",):
-	df.to_csv(path_clean_text.format(forum, group, id_type), index=False)
-
-def process_data(forum="all", group="all", id_type="thread_id", per=1, n_chunks=1):
-	if Path(path_clean_text.format(forum, group, id_type)).exists():
-		df = pd.read_csv(path_clean_text.format(forum, group, id_type))
-		print("found clean text")
-	else:
-		print("creating new clean text")
-		df = load_data(forum, group, per)
-		df = clean_data(df)
-		save_clean_text(df, forum, group)
-		print("saved clean text")
-	print("text to list")
-	df['bigrams'] = text_to_list(df['text_clean'], n_chunks)
-	if id_type == "thread_id":
-		print("making bigrams")
-		df['bigrams'] = make_bigrams(df['bigrams'], n_chunks)
-		print("grouping by thread_id")
-		text = df[['thread_id','bigrams']].groupby(['thread_id'])['bigrams'].sum().tolist()
-	else:
-		print("making bigrams")
-		text = make_bigrams(df['bigrams'], n_chunks)
-	print("saving data")
-	save_data(text, forum, group, id_type, n_chunks)
-
-def process_data_df(df, savename, n_chunks):
-	df = clean_data(df)
-	df.to_csv(str(path_clean_data / "clean_text_{}".format(savename)), index=False)
-	print("saved clean text")
-	print("text to list")
-	df['bigrams'] = text_to_list(df['text_clean'], n_chunks)
-	print("making bigrams")
-	df['bigrams'] = make_bigrams(df['bigrams'], n_chunks)
-	print("grouping by thread_id")
-	text = df[['thread_id','bigrams']].groupby(['thread_id'])['bigrams'].sum().tolist()
-	print("saving data")
-	save_data_df(text, savename, n_chunks)
-
-def save_text_list(forum="all", group="all", force=False):
-	if not Path(path_text_list.format(forum, group)).exists() or force:
-		df = pd.read_csv(path_clean_text.format(forum, group))
-		text = text_to_list(df['text_clean'], 1)
-		with open(path_text_list.format(forum, group), 'wb') as f:
-			pickle.dump(text, f)
-
-def read_text_list(forum="all", group="all"):
-	with open(path_text_list.format(forum, group), 'rb') as f:
-		return pickle.load(f)
-
-def get_freq_dist(forum="all", group="all", force=False):
-	if not Path(path_freq_dist.format(forum, group)).exists() or force:
-		save_text_list(forum, group)
-		text = read_text_list(forum, group)
-		flat_text = [word for doc in text for word in doc]
-		freq_dist = FreqDist(flat_text)
-		with open(path_freq_dist.format(forum, group), 'wb') as f:
-			pickle.dump(freq_dist, f)
-	else:
-		with open(path_freq_dist.format(forum, group), 'rb') as f:
-			freq_dist = pickle.load(f)
-	return freq_dist
-
-def load_data(forum="all", group="all", per=1):
+def load_data(chunksize=1000000, sql=None):
 	conn = create_connection(path_db)
-	if per == 1: # only for toddler
-		sql = gen_sql(forum, group)
-	else:
-		sql_temp = gen_samp_sql_per(forum)
-		temp = pd.read_sql_query(sql_temp, conn)
-		temp = temp.sample(frac=per, random_state=232)
-		temp.to_sql('temp', conn, if_exists='replace', index=False)
-		sql = gen_sql_per(group)
-	df = pd.read_sql_query(sql, conn)
-	conn.close()
-	return df
+	if not sql:
+		sql = gen_sql(forum="all", group="all")
+	df_iterator = pd.read_sql_query(sql, conn, chunksize=chunksize)
+	return df_iterator, conn
 
 
+def make_corpus(df, dictionary, n_chunks=1):
+	time_start = time.time()
+	print("making bigrams")
+	bigram_df = (
+		dd.from_pandas(df, npartitions=200)
+		.map_partitions(lambda d: clean_data(d))
+		.map_partitions(lambda d: text_to_list_df(d, n_chunks=1))
+		.map_partitions(lambda d: make_bigrams_df(d, n_chunks=1))
+		.compute(scheduler='processes')
+	)
+	time_bigrams = time.time()
+	print("time elapsed: {}".format((time_bigrams - time_start) / 60))
+	print("bigrams to corpus")
+	text = bigram_df['bigrams'].tolist()
+	length = len(text)
+	size = length // n_chunks + (length % n_chunks > 0) # round up
+	corpus = []
+	for i_chunk, chunk in enumerate(chunk_list(text, size)):
+		corpus = corpus + [dictionary.doc2bow(c) for c in chunk]
+	print("time elapsed: {}".format((time.time() - time_bigrams) / 60))
+	return bigram_df[['user_url','day','bigrams']], corpus
 
-def save_data(text, forum="all", group="all", id_type="thread_id", n_chunks=1):
-	pickle.dump(text, open(path_lemma_pkl.format(forum, group, id_type), 'wb'))
-	if n_chunks == 1:
-		dictionary = corpora.Dictionary(text)
-	else:
-		length = len(text)
-		size = length // n_chunks + (length % n_chunks > 0) # round up
-		for i, grp in enumerate(chunk_list(text, size)):
-			if i == 0:
-				dictionary = corpora.Dictionary(grp)
-			else:
-				dictionary.add_documents(grp)
-	dictionary.save(FileIO(path_dictionary_gensim.format(forum, group, id_type), "wb"))
-	if n_chunks > 1:
-		length = len(text)
-		size = length // n_chunks + (length % n_chunks > 0) # round up
-		corpus = []
-		for grp in chunk_list(text, size): # iterable
-			corpus = corpus + [dictionary.doc2bow(g) for g in grp]
-	else:
-		corpus = [dictionary.doc2bow(t) for t in text]
-	pickle.dump(corpus, open(path_corpus_pkl.format(forum, group, id_type), 'wb'))
+def process_data(chunksize=1000000, n_chunks=1, sql=None):
+	df_iterator, conn = load_data(chunksize=chunksize, sql=sql)
+	print("iterating")
+	corpus = []
+	try:
+		for i_df, df in enumerate(df_iterator):
+			print("partition {}".format(i_df))
+			start_time = time.time()
+			df = (
+				dd.from_pandas(df, npartitions=200)
+				.map_partitions(lambda d: clean_data(d))
+				.map_partitions(lambda d: text_to_list_df(d, n_chunks=1))
+				.map_partitions(lambda d: make_bigrams_df(d, n_chunks=1))
+				.compute(scheduler='processes')
+			)
+			print("processing time: {}".format((time.time() - start_time) / 60))
+			print("saving message lemmatized text")
+			text = df['bigrams'].tolist()
+			pickle.dump(text, open(path_lemma_pkl.format("all", "all", "message_id_{}".format(i_df)), 'wb'))
+			print("saving thread lemmatized text")
+			# the dictionary and corpus should be based on the thread lemmatized text to get better models
+			text = df[['thread_id','bigrams']].groupby(['thread_id'])['bigrams'].sum().tolist()
+			pickle.dump(text, open(path_lemma_pkl.format("all", "all", "thread_id_{}".format(i_df)), 'wb'))
+			print("creating chunk size")
+			length = len(text)
+			size = length // n_chunks + (length % n_chunks > 0) # round up
+			print("creating dictionary and corpus")
+			for i_chunk, chunk in enumerate(chunk_list(text, size)):
+				if i_chunk == 0 and i_df == 0:
+					dictionary = corpora.Dictionary(chunk)
+				else:
+					dictionary.add_documents(chunk)
+				corpus = corpus + [dictionary.doc2bow(c) for c in chunk]
+			print("saving dictionary")
+			dictionary.save(FileIO(path_dictionary_gensim.format("all", "all", "thread_id"), "wb"))
+			print("saving corpus")
+			pickle.dump(corpus, open(path_corpus_pkl.format("all", "all", "thread_id"), 'wb'))
+	except:
+		conn.close()
 
-def save_data_df(text, savename, n_chunks=1):
-	pickle.dump(text, open(str(path_clean_data / "lemmatized_text_{}.pkl".format(savename)), 'wb'))
-	if n_chunks == 1:
-		dictionary = corpora.Dictionary(text)
-	else:
-		length = len(text)
-		size = length // n_chunks + (length % n_chunks > 0) # round up
-		for i, grp in enumerate(chunk_list(text, size)):
-			if i == 0:
-				dictionary = corpora.Dictionary(grp)
-			else:
-				dictionary.add_documents(grp)
-	dictionary.save(FileIO(str(path_clean_data / "dictionary_{}.gensim".format(savename)), "wb"))
-	if n_chunks > 1:
-		length = len(text)
-		size = length // n_chunks + (length % n_chunks > 0) # round up
-		corpus = []
-		for grp in chunk_list(text, size): # iterable
-			corpus = corpus + [dictionary.doc2bow(g) for g in grp]
-	else:
-		corpus = [dictionary.doc2bow(t) for t in text]
-	pickle.dump(corpus, open(str(path_clean_data / "corpus_{}.pkl".format(savename)), 'wb'))
+def text_to_corpus(text, n_chunks, dictionary):
+	length = len(text)
+	size = length // n_chunks + (length % n_chunks > 0) # round up
+	corpus = []
+	for i_chunk, chunk in enumerate(chunk_list(text, size)):
+		corpus = corpus + [dictionary.doc2bow(c) for c in chunk]
+		return corpus
 
 def chunk_list(l, n):
 	"""Yield successive n-sized chunks from lst."""
@@ -277,15 +235,15 @@ def drop_nonalpha(df):
 	df.drop('has_alpha', axis=1, inplace=True)
 	return df
 
-def make_bigrams(text, n_chunks=1):
-	bigram = models.Phrases(text, min_count=5)
+def make_bigrams_df(df, n_chunks=1):
+	bigram = models.Phrases(df['bigrams'], min_count=5)
 	bigram_mod = models.phrases.Phraser(bigram)
 	result = []
-	for grp in np.array_split(text, n_chunks):
+	for grp in np.array_split(df['bigrams'], n_chunks):
 		grp = grp.tolist()
 		result = result + [bigram_mod[g] for g in grp]
-	return result
-
+	df['bigrams'] = result
+	return df
 
 def clean_data(df):
 	df = replace_emoji(df)
@@ -295,16 +253,17 @@ def clean_data(df):
 	df['text_clean'] = df['text_clean'].apply(clean_text)
 	return df
 
-def text_to_list(text, n_chunks=1):
+def text_to_list_df(df, n_chunks=1):
 	tokenizer = RegexpTokenizer(r'\w+')
 	result = []
-	for grp in np.array_split(text, n_chunks):
+	for grp in np.array_split(df['text_clean'], n_chunks):
 		grp = grp.apply(tokenizer.tokenize)
 		grp = grp.apply(remove_stopwords)
 		grp = grp.apply(lemmatize)
 		grp = grp.tolist()
 		result = result + grp
-	return result
+	df['bigrams'] = result
+	return df
 
 def gen_sql(forum="all", group="all"):
 	sql = '''
@@ -332,32 +291,3 @@ def gen_sql(forum="all", group="all"):
 	sql = sql + ''' text.text_clean!="" '''
 	return sql
 
-def gen_samp_sql_per(forum="all"):
-	sql = ''' SELECT t.id AS thread_id FROM threads AS t '''
-	if forum!="all":
-		sql = sql + '''
-			LEFT JOIN subforums AS s
-			ON s.id=t.subforum_id
-			LEFT JOIN forums AS f
-			ON f.id=s.forum_id
-			WHERE f.id={}
-		'''.format(forums[forum])
-	return sql
-
-def gen_sql_per(group="all"):
-	sql = '''
-		SELECT
-			p.thread_id AS thread_id,
-			text.post_id AS post_id,
-			text.text_clean AS text_clean
-		FROM text
-		LEFT JOIN posts AS p
-		ON text.post_id = p.id
-		WHERE p.thread_id IN (SELECT thread_id FROM temp) AND
-	'''
-	if group=="parent":
-		sql = sql + ''' p.post_count=1 AND'''
-	elif group=="child":
-		sql = sql + ''' p.post_count!=1 AND'''
-	sql = sql + ''' text.text_clean<>"" '''
-	return sql
